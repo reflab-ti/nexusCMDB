@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.local
+certbot/conf/*
+certbot/www/*
+!certbot/conf/.gitkeep
+!certbot/www/.gitkeep
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

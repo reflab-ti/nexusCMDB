@@ -1,0 +1,86 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: nexus-cmdb-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nexus_cmdb}
+      POSTGRES_USER: ${POSTGRES_USER:-nexus_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus_password}
+      TZ: ${TZ:-Europe/Madrid}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-nexus_user} -d $${POSTGRES_DB:-nexus_cmdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus-cmdb-app
+    environment:
+      PORT: ${APP_PORT:-3002}
+      DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@db:5432/${POSTGRES_DB:-nexus_cmdb}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?Set APP_ENCRYPTION_KEY in .env}
+      TZ: ${TZ:-Europe/Madrid}
+      LDAP_TLS_REJECT_UNAUTHORIZED: "false"
+      NUTANIX_PASSWORD: ${NUTANIX_PASSWORD:-}
+      NUTANIX_REQUEST_TIMEOUT_MS: ${NUTANIX_REQUEST_TIMEOUT_MS:-15000}
+      ALLOW_INSECURE_NUTANIX_HTTP: ${ALLOW_INSECURE_NUTANIX_HTTP:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "${APP_PORT:-3002}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: nexus-cmdb-nginx
+    depends_on:
+      - app
+    environment:
+      CERTBOT_DOMAIN: ${CERTBOT_DOMAIN:-dev-nexuscmdb.reflab.dev}
+      APP_PORT: ${APP_PORT:-3002}
+      NGINX_CERT_RELOAD_INTERVAL: ${NGINX_CERT_RELOAD_INTERVAL:-12h}
+      TZ: ${TZ:-Europe/Madrid}
+    ports:
+      - "${NGINX_HTTPS_PORT:-3002}:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf.template:ro
+      - ./nginx-entrypoint.sh:/usr/local/bin/nginx-entrypoint.sh:ro
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: ["/bin/sh", "/usr/local/bin/nginx-entrypoint.sh"]
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/dns-cloudflare
+    container_name: nexus-cmdb-certbot
+    environment:
+      CERTBOT_DOMAIN: ${CERTBOT_DOMAIN:-dev-nexuscmdb.reflab.dev}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:?Set CERTBOT_EMAIL in .env}
+      CERTBOT_RENEW_BEFORE_DAYS: ${CERTBOT_RENEW_BEFORE_DAYS:-30}
+      CERTBOT_DNS_PROPAGATION_SECONDS: ${CERTBOT_DNS_PROPAGATION_SECONDS:-60}
+      CERTBOT_STAGING: ${CERTBOT_STAGING:-0}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN in .env}
+      TZ: ${TZ:-Europe/Madrid}
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/certbot-renew.sh:/usr/local/bin/certbot-renew.sh:ro
+      - ./certbot/dns-credentials.ini:/etc/letsencrypt/dns-credentials.ini:ro
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sh /usr/local/bin/certbot-renew.sh; sleep 7d & wait $${!}; done'"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

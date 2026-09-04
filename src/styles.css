@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.ou-tree-level-0 {
+  padding-left: 0;
+}
+
+.ou-tree-level-1 {
+  padding-left: 14px;
+}
+
+.ou-tree-level-2 {
+  padding-left: 28px;
+}
+
+.ou-tree-level-3 {
+  padding-left: 42px;
+}
+
+.ou-tree-level-4 {
+  padding-left: 56px;
+}
+
+.ou-tree-level-5 {
+  padding-left: 70px;
+}
+
+.ou-tree-level-6 {
+  padding-left: 84px;
+}
+
+.ou-tree-level-7 {
+  padding-left: 98px;
+}
+
+.ou-tree-level-8 {
+  padding-left: 112px;
+}
+
+.ou-tree-level-9 {
+  padding-left: 126px;
+}
+
+.ou-tree-level-10 {
+  padding-left: 140px;
+}
+
+.ou-tree-level-11 {
+  padding-left: 154px;
+}
+
+.ou-tree-level-12 {
+  padding-left: 168px;
+}
