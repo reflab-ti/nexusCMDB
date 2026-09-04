@@ -57,14 +57,11 @@ if [ ! -f "${CERT_PATH}" ] || [ ! -f "${KEY_PATH}" ]; then
 fi
 
 EXP_DATE="$(openssl x509 -enddate -noout -in "${CERT_PATH}" | cut -d= -f2)"
-EXP_EPOCH="$(date -d "${EXP_DATE}" +%s)"
-CURRENT_EPOCH="$(date +%s)"
-REMAINING_DAYS="$(((EXP_EPOCH - CURRENT_EPOCH) / 86400))"
+RENEW_BEFORE_SECONDS="$((RENEW_BEFORE_DAYS * 86400))"
 
 echo "El certificado para ${DOMAIN} caduca el: ${EXP_DATE}"
-echo "Dias restantes: ${REMAINING_DAYS}"
 
-if [ "${REMAINING_DAYS}" -le "${RENEW_BEFORE_DAYS}" ]; then
+if ! openssl x509 -checkend "${RENEW_BEFORE_SECONDS}" -noout -in "${CERT_PATH}" >/dev/null; then
   echo "El certificado esta dentro del umbral de renovacion (${RENEW_BEFORE_DAYS} dias)."
   request_certificate
 else
@@ -72,4 +69,3 @@ else
 fi
 
 echo "=== Fin del proceso de verificacion ==="
-

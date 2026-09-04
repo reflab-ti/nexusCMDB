@@ -489,7 +489,7 @@ app.post("/api/nutanix/test", async (req, res) => {
     password,
   } = req.body ?? {};
   const storedPassword = decryptSecret(storedNutanix.passwordEncrypted);
-  const effectivePassword = password || storedPassword || process.env.NUTANIX_PASSWORD;
+  const effectivePassword = password || storedPassword;
 
   if (!prismUrl || !username) {
     res.status(400).json({ error: "missing_fields", detail: "Prism Central y usuario son obligatorios." });
@@ -1653,7 +1653,7 @@ async function runNutanixMappingSync({ config, mapping, jira, token, onProgress,
 
   addPhase("Validando configuracion de Nutanix Prism Central.");
   const nutanix = config.nutanix ?? {};
-  const nutanixPassword = decryptSecret(nutanix.passwordEncrypted) || process.env.NUTANIX_PASSWORD;
+  const nutanixPassword = decryptSecret(nutanix.passwordEncrypted);
   if (!nutanix.prismUrl || !nutanix.username || !nutanixPassword) {
     throw new Error("Nutanix no tiene conexion completa o contrasena cifrada guardada.");
   }
