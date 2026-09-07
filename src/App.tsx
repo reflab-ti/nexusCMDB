@@ -117,6 +117,7 @@ type Mapping = {
     jiraAttribute: string;
     activeValue: string;
     inactiveValue: string;
+    disabledValue?: string;
   };
   lastSync: string;
   status: SyncStatus;
@@ -1779,7 +1780,7 @@ function JiraAssetsHelpModal({ onClose }: { onClose: () => void }) {
               </div>
             </div>
             <div className="mt-3 border border-amber-100 bg-amber-50 text-amber-800 p-3 text-xs">
-              Si tu token no permite leer configuracion de Assets, informa manualmente los campos ID estado Activo e ID estado Inactivo. Solo anade scopes de escritura o borrado de schemas, object types o atributos si la aplicacion va a modificar la estructura de Assets: write/delete:cmdb-schema:jira, write/delete:cmdb-type:jira y write/delete:cmdb-attribute:jira. Para sincronizar elementos existentes no son necesarios.
+              Si tu token no permite leer configuracion de Assets, informa manualmente en cada mapeo los campos ID estado Alta, ID estado Baja e ID estado Deshabilitado. Solo anade scopes de escritura o borrado de schemas, object types o atributos si la aplicacion va a modificar la estructura de Assets: write/delete:cmdb-schema:jira, write/delete:cmdb-type:jira y write/delete:cmdb-attribute:jira. Para sincronizar elementos existentes no son necesarios.
             </div>
           </div>
 
@@ -1933,6 +1934,7 @@ function MappingEditorPage({
     jiraAttribute: initialMapping?.statusConfig?.jiraAttribute ?? getDefaultStatusAttribute(jiraAttributeDefinitions),
     activeValue: initialMapping?.statusConfig?.activeValue ?? "",
     inactiveValue: initialMapping?.statusConfig?.inactiveValue ?? "",
+    disabledValue: initialMapping?.statusConfig?.disabledValue ?? "",
   });
   const [schedule, setSchedule] = useState(normalizeMappingSchedule(initialMapping));
   const [validationMessage, setValidationMessage] = useState("");
@@ -1940,8 +1942,13 @@ function MappingEditorPage({
   const [adSyncMessage, setAdSyncMessage] = useState("");
   const [jiraSyncStatus, setJiraSyncStatus] = useState<AdTestStatus>("idle");
   const [jiraSyncMessage, setJiraSyncMessage] = useState("");
+  const statusAttributeManaged = source === "AD" && entity === "Usuarios" && statusConfig.enabled && Boolean(statusConfig.jiraAttribute);
+  const jiraAttributesForFields = useMemo(
+    () => statusAttributeManaged ? jiraAttributes.filter((attribute) => attribute !== statusConfig.jiraAttribute) : jiraAttributes,
+    [jiraAttributes, statusAttributeManaged, statusConfig.jiraAttribute]
+  );
   const availableSourceForNewField = attrs.find((attr) => !fields.some((field) => field.sourceAttribute === attr)) ?? "";
-  const availableJiraForNewField = jiraAttributes.find((attribute) => !fields.some((field) => field.jiraAttribute === attribute)) ?? "";
+  const availableJiraForNewField = jiraAttributesForFields.find((attribute) => !fields.some((field) => field.jiraAttribute === attribute)) ?? "";
 
   useEffect(() => {
     if (source === "Nutanix") setEntity("VMs");
@@ -1992,6 +1999,11 @@ function MappingEditorPage({
     setStatusConfig((current) => ({ ...current, jiraAttribute: getDefaultStatusAttribute(jiraAttributeDefinitions) }));
     setValidationMessage("");
   }, [source, entity, objectType, jiraAttributeDefinitions, jiraAttributes, attrs]);
+
+  useEffect(() => {
+    if (!statusAttributeManaged) return;
+    setFields((current) => current.filter((field) => field.jiraAttribute !== statusConfig.jiraAttribute));
+  }, [statusAttributeManaged, statusConfig.jiraAttribute]);
 
   const syncAdOus = async () => {
     setAdSyncStatus("testing");
@@ -2101,7 +2113,10 @@ function MappingEditorPage({
       setValidationMessage("No se pueden repetir atributos origen ni atributos Jira dentro del mismo mapeo.");
       return;
     }
-    const missingRequired = requiredJiraAttributes.filter((attribute) => !fields.some((field) => field.jiraAttribute === attribute));
+    const missingRequired = requiredJiraAttributes.filter((attribute) => {
+      if (statusAttributeManaged && attribute === statusConfig.jiraAttribute) return false;
+      return !fields.some((field) => field.jiraAttribute === attribute);
+    });
     if (missingRequired.length) {
       setValidationMessage(`Anade los atributos obligatorios de Jira antes de guardar: ${missingRequired.join(", ")}.`);
       return;
@@ -2110,8 +2125,8 @@ function MappingEditorPage({
       setValidationMessage("Marca al menos un atributo como clave para poder identificar el objeto en Jira.");
       return;
     }
-    if (source === "AD" && entity === "Usuarios" && statusConfig.enabled && (!statusConfig.jiraAttribute || !statusConfig.activeValue.trim() || !statusConfig.inactiveValue.trim())) {
-      setValidationMessage("Completa la configuracion de Estado del mapeo: atributo Estado, valor Alta y valor Baja.");
+    if (source === "AD" && entity === "Usuarios" && statusConfig.enabled && (!statusConfig.jiraAttribute || !statusConfig.activeValue.trim() || !statusConfig.inactiveValue.trim() || !statusConfig.disabledValue.trim())) {
+      setValidationMessage("Completa la configuracion de Estado del mapeo: atributo Estado, valor Alta, valor Baja y valor Deshabilitado.");
       return;
     }
     const mapping: Mapping = {
@@ -2130,6 +2145,7 @@ function MappingEditorPage({
         jiraAttribute: statusConfig.jiraAttribute,
         activeValue: statusConfig.activeValue.trim(),
         inactiveValue: statusConfig.inactiveValue.trim(),
+        disabledValue: statusConfig.disabledValue.trim(),
       } : undefined,
       lastSync: initialMapping?.lastSync ?? "Pendiente",
       status: initialMapping?.status ?? "Aviso",
@@ -2216,7 +2232,7 @@ function MappingEditorPage({
             <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-bold text-slate-900">Destino</div>
-                <div className="text-xs text-slate-500">Selecciona el esquema, el tipo de objeto y el atributo de estado en Jira Assets.</div>
+                <div className="text-xs text-slate-500">Selecciona el esquema y el tipo de objeto en Jira Assets.</div>
               </div>
               <button
                 onClick={syncJiraCatalog}
@@ -2233,10 +2249,9 @@ function MappingEditorPage({
                   {jiraSyncMessage}
                 </div>
               ) : null}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <SelectInput label="Esquema Jira" value={schema} onChange={setSchema} options={availableJiraSchemas.map((item) => item.name)} />
                 <SelectInput label="Tipo objeto" value={objectType} onChange={setObjectType} options={objectTypes.map((item) => item.name)} />
-                <SelectInput label="Atributo Estado" value={statusConfig.jiraAttribute} onChange={(jiraAttribute) => setStatusConfig({ ...statusConfig, jiraAttribute })} options={jiraAttributes} />
               </div>
               {!availableJiraSchemas.length ? (
                 <div className="border border-amber-100 bg-amber-50 text-amber-800 p-4 text-sm">
@@ -2249,7 +2264,7 @@ function MappingEditorPage({
                     <div>
                       <div className="text-xs font-bold uppercase text-slate-600">Control de estado</div>
                       <div className="text-xs text-slate-500">
-                        Para controlar el estado hay que identificar con el ID los estados de Alta y Baja, sigue la documentacion oficial para encontrar el ID de estado o crearlo.{" "}
+                        Para controlar el estado hay que identificar con el ID los estados de Alta, Baja y Deshabilitado, sigue la documentacion oficial para encontrar el ID de estado o crearlo.{" "}
                         <a className="text-blue-700 font-semibold hover:underline" href="https://support.atlassian.com/assets/docs/add-a-status/" target="_blank" rel="noreferrer">https://support.atlassian.com/assets/docs/add-a-status/</a>
                       </div>
                     </div>
@@ -2259,9 +2274,11 @@ function MappingEditorPage({
                     </label>
                   </div>
                   {statusConfig.enabled ? (
-                    <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <SelectInput label="Atributo Estado" value={statusConfig.jiraAttribute} onChange={(jiraAttribute) => setStatusConfig({ ...statusConfig, jiraAttribute })} options={jiraAttributes} />
                       <TextInput label="Valor Alta" value={statusConfig.activeValue} onChange={(activeValue) => setStatusConfig({ ...statusConfig, activeValue })} placeholder="Alta o ID del estado" />
                       <TextInput label="Valor Baja" value={statusConfig.inactiveValue} onChange={(inactiveValue) => setStatusConfig({ ...statusConfig, inactiveValue })} placeholder="Baja o ID del estado" />
+                      <TextInput label="Valor Deshabilitado" value={statusConfig.disabledValue} onChange={(disabledValue) => setStatusConfig({ ...statusConfig, disabledValue })} placeholder="Deshabilitado o ID del estado" />
                     </div>
                   ) : null}
                 </div>
@@ -2328,7 +2345,7 @@ function MappingEditorPage({
                         className="w-full h-9 border border-slate-300 bg-white px-2 text-sm focus:outline-none focus:border-blue-500"
                       >
                         {!jiraAttributes.length ? <option value="">Sin atributos cargados</option> : null}
-                        {getAvailableAttributesForRow(jiraAttributes, fields.map((item) => item.jiraAttribute), field.jiraAttribute).map((attribute) => (
+                        {getAvailableAttributesForRow(jiraAttributesForFields, fields.map((item) => item.jiraAttribute), field.jiraAttribute).map((attribute) => (
                           <option key={attribute} value={attribute}>{attribute}</option>
                         ))}
                       </select>

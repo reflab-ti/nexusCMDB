@@ -1527,7 +1527,7 @@ async function runAdMappingSync({ config, mapping, jira, token, onProgress, isCa
     token,
     onProgress: (detail) => addPhase(detail),
   });
-  addPhase("Resolviendo configuracion de ciclo de vida y estado Activo/Inactivo.");
+  addPhase("Resolviendo configuracion de ciclo de vida y estados Alta/Baja/Deshabilitado.");
   const lifecycle = await resolveJiraUserLifecycle({ mapping, target, jira, token, jiraObjects: existingJiraObjects });
   const activeKeyValues = new Set();
 
@@ -1855,7 +1855,8 @@ async function syncSingleAdEntry({ entry, mapping, target, jira, token, lifecycl
     }
     activeKeyValues.add(normalizeSyncKeyValue(keyValue));
     const values = await buildMappedValues({ entry, mapping, target, jira, token, referenceIndexes });
-    if (lifecycle) addMappedConstantValue({ values, attribute: lifecycle.statusAttribute, value: lifecycle.activeStatus.id, displayValue: lifecycle.activeStatus.name });
+    const entryStatus = lifecycle ? getAdUserLifecycleStatus(entry, lifecycle) : null;
+    if (entryStatus) addMappedConstantValue({ values, attribute: lifecycle.statusAttribute, value: entryStatus.id, displayValue: entryStatus.name });
     if (!values.syncAttributes.length) {
       return { created, updated, unchanged: 1, errors, changes };
     }
@@ -1894,7 +1895,7 @@ async function syncSingleAdEntry({ entry, mapping, target, jira, token, lifecycl
       const createdObject = await createJiraObject({ jira, token, objectTypeId: target.objectType.id, attributes: values.attributes, target });
       if (createdObject.payload.raw) existingIndex?.byKey.set(normalizedKey, { ...createdObject.payload.raw, attributes: values.attributes });
       created += 1;
-      changes.push({ object: getAdDisplayName(entry), action: "Creado", detail: `${mapping.objectType} creado en Jira Assets (${createdObject.payload.raw?.objectKey ?? createdObject.payload.raw?.id ?? "sin clave"}).${lifecycle ? " Estado inicial: Activo." : ""}` });
+      changes.push({ object: getAdDisplayName(entry), action: "Creado", detail: `${mapping.objectType} creado en Jira Assets (${createdObject.payload.raw?.objectKey ?? createdObject.payload.raw?.id ?? "sin clave"}).${entryStatus ? ` Estado inicial: ${entryStatus.name}.` : ""}` });
     }
     if (values.fieldErrors.length) {
       errors += values.fieldErrors.length;
@@ -2008,7 +2009,10 @@ async function syncSingleNutanixVm({ entry, mapping, target, jira, token, existi
 
 function buildAdSourceAttributeList(mapping) {
   const attributes = mapping.fields.map((field) => field.sourceAttribute).filter(Boolean);
-  if (attributes.some((attribute) => String(attribute).toLowerCase() === "msds-userpasswordexpirytimecomputed")) {
+  if (
+    (mapping.source === "AD" && mapping.entity === "Usuarios" && mapping.statusConfig?.enabled !== false) ||
+    attributes.some((attribute) => String(attribute).toLowerCase() === "msds-userpasswordexpirytimecomputed")
+  ) {
     attributes.push("userAccountControl");
   }
   return [...new Set(attributes)];
@@ -2196,24 +2200,36 @@ async function resolveJiraUserLifecycle({ mapping, target, jira, token, jiraObje
     throw new Error(`El tipo de objeto Jira seleccionado para Usuarios no tiene un atributo Estado/Status detectable. Atributos leidos de Jira: ${target.attributes.map((attribute) => attribute.name).join(", ") || "ninguno"}.`);
   }
   if (!isWritableJiraAttribute(statusAttribute)) {
-    throw new Error("El atributo Jira Estado no es editable. No se puede gestionar Activo/Inactivo desde la sincronizacion.");
+    throw new Error("El atributo Jira Estado no es editable. No se puede gestionar Alta/Baja/Deshabilitado desde la sincronizacion.");
   }
   const activeStatusId = String(mapping.statusConfig?.activeValue ?? "").trim();
   const inactiveStatusId = String(mapping.statusConfig?.inactiveValue ?? "").trim();
-  if (activeStatusId && inactiveStatusId) {
+  const disabledStatusId = String(mapping.statusConfig?.disabledValue ?? "").trim();
+  if (activeStatusId && inactiveStatusId && disabledStatusId) {
     return {
       statusAttribute,
-      activeStatus: { id: activeStatusId, name: "Activo" },
-      inactiveStatus: { id: inactiveStatusId, name: "Inactivo" },
+      activeStatus: { id: activeStatusId, name: "Alta" },
+      inactiveStatus: { id: inactiveStatusId, name: "Baja" },
+      disabledStatus: { id: disabledStatusId, name: "Deshabilitado" },
     };
   }
 
   const inferred = await inferJiraStatusIdsFromObjects({ jira, token, target, statusAttribute, jiraObjects });
-  if (inferred.activeStatus?.id && inferred.inactiveStatus?.id) {
-    return { statusAttribute, activeStatus: inferred.activeStatus, inactiveStatus: inferred.inactiveStatus };
+  if (inferred.activeStatus?.id && inferred.inactiveStatus?.id && inferred.disabledStatus?.id) {
+    return { statusAttribute, activeStatus: inferred.activeStatus, inactiveStatus: inferred.inactiveStatus, disabledStatus: inferred.disabledStatus };
   }
 
-  throw new Error(`Configura en Jira Assets los campos ID estado Activo e ID estado Inactivo. No se pudieron deducir desde objetos existentes del tipo ${target.objectType.name}. Detectado Activo: ${inferred.activeStatus?.id ?? "no"}; Inactivo: ${inferred.inactiveStatus?.id ?? "no"}.`);
+  throw new Error(`Configura en el mapeo los campos ID estado Alta, ID estado Baja e ID estado Deshabilitado. No se pudieron deducir desde objetos existentes del tipo ${target.objectType.name}. Detectado Alta: ${inferred.activeStatus?.id ?? "no"}; Baja: ${inferred.inactiveStatus?.id ?? "no"}; Deshabilitado: ${inferred.disabledStatus?.id ?? "no"}.`);
+}
+
+function getAdUserLifecycleStatus(entry, lifecycle) {
+  return isAdUserDisabled(entry) ? lifecycle.disabledStatus : lifecycle.activeStatus;
+}
+
+function isAdUserDisabled(entry) {
+  const key = Object.keys(entry ?? {}).find((item) => item.toLowerCase() === "useraccountcontrol");
+  const value = key ? Number(entry[key]) : 0;
+  return Number.isFinite(value) && (value & 0x0002) !== 0;
 }
 
 function findJiraAttributeByName(attributes, name) {
@@ -2231,7 +2247,7 @@ function findJiraStatusAttribute(attributes) {
 
 async function inferJiraStatusIdsFromObjects({ jira, token, target, statusAttribute, jiraObjects }) {
   const objects = jiraObjects ?? await findJiraObjectsForMappingTarget({ jira, token, target, action: "leer objetos existentes de Jira Assets para deducir estados" });
-  const found = { activeStatus: null, inactiveStatus: null };
+  const found = { activeStatus: null, inactiveStatus: null, disabledStatus: null };
 
   for (const object of objects) {
     const attributeValues = getExistingJiraAttributeValues(object);
@@ -2240,14 +2256,17 @@ async function inferJiraStatusIdsFromObjects({ jira, token, target, statusAttrib
       const candidate = extractJiraStatusCandidate(value);
       if (!candidate.id) continue;
       const normalized = normalizeName(candidate.name);
-      if (!found.activeStatus && ["activo", "active"].includes(normalized)) {
-        found.activeStatus = { id: candidate.id, name: candidate.name || "Activo" };
+      if (!found.activeStatus && ["alta", "activo", "active"].includes(normalized)) {
+        found.activeStatus = { id: candidate.id, name: candidate.name || "Alta" };
       }
-      if (!found.inactiveStatus && ["inactivo", "inactive"].includes(normalized)) {
-        found.inactiveStatus = { id: candidate.id, name: candidate.name || "Inactivo" };
+      if (!found.inactiveStatus && ["baja", "inactivo", "inactive"].includes(normalized)) {
+        found.inactiveStatus = { id: candidate.id, name: candidate.name || "Baja" };
+      }
+      if (!found.disabledStatus && ["deshabilitado", "disabled"].includes(normalized)) {
+        found.disabledStatus = { id: candidate.id, name: candidate.name || "Deshabilitado" };
       }
     }
-    if (found.activeStatus && found.inactiveStatus) break;
+    if (found.activeStatus && found.inactiveStatus && found.disabledStatus) break;
   }
 
   return found;
@@ -2340,13 +2359,13 @@ async function markMissingAdUsersInactiveInJira({ jira, token, target, activeKey
       }
 
       const objectId = getJiraObjectId(object);
-      if (!objectId) throw new Error("No se pudo resolver el ID del objeto Jira para marcarlo como Inactivo.");
+      if (!objectId) throw new Error("No se pudo resolver el ID del objeto Jira para marcarlo como Baja.");
       await updateJiraObject({ jira, token, objectId, objectTypeId: target.objectType.id, attributes: diff.changedAttributes, target });
       updated += 1;
-      changes.push({ object: getJiraObjectDisplayName(object, keyValue), action: "Actualizado", detail: `${target.objectType.name} marcado como Inactivo porque no existe en AD. Atributos modificados: ${diff.details.join("; ")}.` });
+      changes.push({ object: getJiraObjectDisplayName(object, keyValue), action: "Actualizado", detail: `${target.objectType.name} marcado como Baja porque no existe en AD. Atributos modificados: ${diff.details.join("; ")}.` });
     } catch (error) {
       errors += 1;
-      changes.push({ object: getJiraObjectDisplayName(object, "Objeto Jira"), action: "Error", detail: error instanceof Error ? error.message : "Error al marcar usuario como Inactivo." });
+      changes.push({ object: getJiraObjectDisplayName(object, "Objeto Jira"), action: "Error", detail: error instanceof Error ? error.message : "Error al marcar usuario como Baja." });
     }
   }
 
