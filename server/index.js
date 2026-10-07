@@ -15,6 +15,11 @@ const port = Number(process.env.PORT ?? 3000);
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
+// An idle PostgreSQL client can emit an error after a database restart. Without
+// this listener, pg forwards it as an unhandled EventEmitter error and Node exits.
+pool.on("error", (error) => {
+  console.error("PostgreSQL pool connection error:", redactSecrets(error instanceof Error ? error.message : error));
+});
 const legacyEncryptionSecret = "nexus-cmdb-local-dev-change-this-64-char-secret-before-prod";
 const encryptionSecret = process.env.APP_ENCRYPTION_KEY || legacyEncryptionSecret;
 const encryptionKey = deriveEncryptionKey(encryptionSecret);
@@ -25,6 +30,8 @@ const SYNC_BATCH_SIZE = Number(process.env.SYNC_BATCH_SIZE || 50);
 const JIRA_RETRY_ATTEMPTS = Number(process.env.JIRA_RETRY_ATTEMPTS || 3);
 const JIRA_REQUEST_TIMEOUT_MS = Number(process.env.JIRA_REQUEST_TIMEOUT_MS || 20000);
 const MAPPING_SCHEDULER_INTERVAL_MS = Number(process.env.MAPPING_SCHEDULER_INTERVAL_MS || 60_000);
+const MAPPING_SCHEDULER_STARTUP_DELAY_MS = Number(process.env.MAPPING_SCHEDULER_STARTUP_DELAY_MS || 60_000);
+const DATABASE_STARTUP_RETRY_MS = Number(process.env.DATABASE_STARTUP_RETRY_MS || 5_000);
 const syncJobs = new Map();
 const scheduledSyncs = new Set();
 const syncContextStorage = new AsyncLocalStorage();
@@ -163,7 +170,6 @@ function requireCsrfHeader(req, res, next) {
 }
 
 async function initDb() {
-  reportSecurityConfiguration();
   await createDatabaseSchema();
   await pruneExpiredSessions();
   await migrateStoredAdPassword();
@@ -171,6 +177,45 @@ async function initDb() {
   await migrateStoredJiraToken();
   await migrateStoredEncryptedSecrets();
   await migrateObsoleteStoredState();
+  await recoverInterruptedSyncs();
+}
+
+async function recoverInterruptedSyncs() {
+  const logs = await readState("logs");
+  const mappings = await readState("mappings");
+  const interruptedLogIds = new Set();
+
+  if (Array.isArray(logs)) {
+    const nextLogs = logs.map((log) => {
+      if (log?.status !== "Ejecutando") return log;
+      interruptedLogIds.add(log.id);
+      return {
+        ...log,
+        status: "Interrumpido",
+        errors: Math.max(1, Number(log.errors || 0)),
+        changes: [
+          ...(Array.isArray(log.changes) ? log.changes : []),
+          { object: log.mappingName || "Sincronizacion", action: "Error", detail: "La ejecucion fue interrumpida por un reinicio del servidor. No se reanudara automaticamente hasta su siguiente intervalo programado." },
+        ],
+      };
+    });
+    if (interruptedLogIds.size) await writeState("logs", nextLogs);
+  }
+
+  if (Array.isArray(mappings) && interruptedLogIds.size) {
+    const nextMappings = mappings.map((mapping) => {
+      if (mapping?.status !== "Ejecutando") return mapping;
+      const interruptedLog = Array.isArray(logs) ? logs.find((log) => log?.mappingName === mapping.name && interruptedLogIds.has(log.id)) : null;
+      return {
+        ...mapping,
+        status: "Interrumpido",
+        // Keep the original start time as the scheduling reference. This avoids
+        // starting the same heavy synchronization again immediately after boot.
+        lastSync: interruptedLog?.startedAt || mapping.lastSync,
+      };
+    });
+    await writeState("mappings", nextMappings);
+  }
 }
 
 async function createDatabaseSchema() {
@@ -1240,7 +1285,7 @@ function startMappingSchedulerTask() {
     runScheduledMappingsTick("startup").catch((error) => {
       console.warn("Startup mapping sync tick failed:", error instanceof Error ? error.message : error);
     });
-  }, Number(process.env.MAPPING_SCHEDULER_STARTUP_DELAY_MS || 5000)).unref?.();
+  }, MAPPING_SCHEDULER_STARTUP_DELAY_MS).unref?.();
   setInterval(() => {
     runScheduledMappingsTick("interval").catch((error) => {
       console.warn("Scheduled mapping sync tick failed:", error instanceof Error ? error.message : error);
@@ -1269,7 +1314,11 @@ async function runScheduledMappingsTick(reason = "interval") {
       console.log(`Mapping scheduler startup: ${scheduledMappings.length} mapeo(s) programado(s), ninguno vencido.`);
     }
     for (const mapping of dueMappings) {
-      void runScheduledMappingSync({ mapping, config, jira, token });
+      void runScheduledMappingSync({ mapping, config, jira, token }).catch((error) => {
+        // A scheduled task must never become an unhandled rejection capable of
+        // terminating the web process.
+        console.error("Unhandled scheduled mapping sync failure:", sanitizeLdapError(error));
+      });
     }
   } finally {
     mappingSchedulerTickRunning = false;
@@ -1342,8 +1391,12 @@ async function runScheduledMappingSync({ mapping, config, jira, token }) {
       errors: 1,
       changes: [{ object: mapping.objectType || mapping.name, action: "Error", detail: error instanceof Error ? error.message : "Error al ejecutar la sincronizacion programada." }],
     };
-    await upsertStoredSyncLog(failedLog);
-    await updateStoredMappingStatus(mapping.id, { lastSync: startedAt, status: "Error" });
+    await upsertStoredSyncLog(failedLog).catch((persistError) => {
+      console.error("Could not persist scheduled sync failure:", persistError instanceof Error ? persistError.message : persistError);
+    });
+    await updateStoredMappingStatus(mapping.id, { lastSync: startedAt, status: "Error" }).catch((persistError) => {
+      console.error("Could not persist scheduled mapping failure status:", persistError instanceof Error ? persistError.message : persistError);
+    });
   } finally {
     scheduledSyncs.delete(mapping.id);
   }
@@ -3657,15 +3710,45 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
 });
 
-initDb()
-  .then(() => {
+function isTransientDatabaseError(error) {
+  const code = error?.code;
+  return ["ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "57P01", "57P02", "57P03", "08000", "08001", "08003", "08004", "08006", "08P01"].includes(code);
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function startApplication() {
+  reportSecurityConfiguration();
+  for (;;) {
+    try {
+      await initDb();
+      break;
+    } catch (error) {
+      if (!isTransientDatabaseError(error)) {
+        console.error("Database initialization failed with a non-recoverable error", error);
+        process.exit(1);
+      }
+      console.error(`Database is not ready (${error.code || "unknown error"}). Retrying in ${DATABASE_STARTUP_RETRY_MS} ms.`);
+      await wait(DATABASE_STARTUP_RETRY_MS);
+    }
+  }
+
+  app.listen(port, "0.0.0.0", () => {
+    console.log(`Nexus CMDB listening on ${port}`);
+    // Background work begins only after the HTTP process is healthy.
     startJiraCatalogRefreshTask();
     startMappingSchedulerTask();
-    app.listen(port, "0.0.0.0", () => {
-      console.log(`Nexus CMDB listening on ${port}`);
-    });
-  })
-  .catch((error) => {
-    console.error("Database initialization failed", error);
-    process.exit(1);
   });
+}
+
+process.on("unhandledRejection", (error) => {
+  console.error("Unhandled promise rejection:", redactSecrets(error instanceof Error ? error.stack || error.message : error));
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught application exception:", redactSecrets(error instanceof Error ? error.stack || error.message : error));
+});
+
+void startApplication();

@@ -14,6 +14,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
   app:
     build:
@@ -28,6 +30,10 @@ services:
       LDAP_TLS_REJECT_UNAUTHORIZED: "false"
       NUTANIX_REQUEST_TIMEOUT_MS: ${NUTANIX_REQUEST_TIMEOUT_MS:-15000}
       ALLOW_INSECURE_NUTANIX_HTTP: ${ALLOW_INSECURE_NUTANIX_HTTP:-false}
+      SYNC_BATCH_SIZE: ${SYNC_BATCH_SIZE:-50}
+      MAPPING_SCHEDULER_INTERVAL_MS: ${MAPPING_SCHEDULER_INTERVAL_MS:-60000}
+      MAPPING_SCHEDULER_STARTUP_DELAY_MS: ${MAPPING_SCHEDULER_STARTUP_DELAY_MS:-60000}
+      DATABASE_STARTUP_RETRY_MS: ${DATABASE_STARTUP_RETRY_MS:-5000}
     depends_on:
       db:
         condition: service_healthy
@@ -40,6 +46,13 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + process.env.PORT + '/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    stop_grace_period: 45s
     restart: unless-stopped
 
   nginx:
